@@ -27,7 +27,6 @@ export interface EngineSettings {
   hf_token: string;
   ollama_model: string;
   ollama_num_ctx: number;
-  device_name: string;
   server_url: string;
   remote_mode: boolean;
 }
@@ -36,12 +35,6 @@ export interface ProgressPayload {
   stage: string;
   pct: number;
   msg: string;
-}
-
-export interface AudioDevice {
-  name: string;
-  id: string;
-  is_default: boolean;
 }
 
 export interface StartupAlerts {

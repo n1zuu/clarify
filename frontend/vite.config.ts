@@ -1,9 +1,15 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
-import {defineConfig} from 'vite';
+import fs from 'fs';
+import { defineConfig } from 'vite';
 
 export default defineConfig(() => {
+  // Load certs if they exist — needed for HTTPS dev server over Tailscale
+  const certPath = path.join(__dirname, 'cert.pem');
+  const keyPath  = path.join(__dirname, 'key.pem');
+  const hasCerts = fs.existsSync(certPath) && fs.existsSync(keyPath);
+
   return {
     plugins: [react(), tailwindcss()],
     resolve: {
@@ -12,11 +18,23 @@ export default defineConfig(() => {
       },
     },
     server: {
-      // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
-      hmr: process.env.DISABLE_HMR !== 'true',
-      // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
+      hmr: process.env.DISABLE_HMR !== 'true'
+        ? {
+            // Use wss:// for HMR so browsers don't block it on HTTPS pages
+            protocol: hasCerts ? 'wss' : 'ws',
+            port: 3000,
+          }
+        : false,
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      allowedHosts: 'all',
+      cors: true,
+      // Run Vite itself over HTTPS so module requests aren't treated as mixed content
+      https: hasCerts
+        ? {
+            cert: fs.readFileSync(certPath),
+            key:  fs.readFileSync(keyPath),
+          }
+        : undefined,
     },
   };
 });

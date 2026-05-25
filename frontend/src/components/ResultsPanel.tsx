@@ -22,8 +22,26 @@ export function ResultsPanel({ result, onClose }: ResultsPanelProps) {
   };
 
   const handleTriggerDownload = (format: "txt" | "md" | "docx") => {
-    const textToDownload = format === "docx" || format === "txt" ? result.transcript_text : result.summary_text;
-    const blob = new Blob([textToDownload], { type: "text/plain" });
+    if (format === "docx") {
+      // The backend generated a real DOCX (binary ZIP format) — fetch it
+      // directly from the download endpoint rather than faking a text blob.
+      if (!result.export_path) {
+        console.error("No export path available for DOCX download.");
+        return;
+      }
+      const link = document.createElement("a");
+      link.href = `/api/download?path=${encodeURIComponent(result.export_path)}`;
+      link.download = "Clarify_Session.docx";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      return;
+    }
+
+    // TXT and MD are plaintext — blob download is correct for these
+    const textToDownload = format === "txt" ? result.transcript_text : result.summary_text;
+    const mimeType = format === "md" ? "text/markdown" : "text/plain";
+    const blob = new Blob([textToDownload], { type: mimeType });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
@@ -87,11 +105,20 @@ export function ResultsPanel({ result, onClose }: ResultsPanelProps) {
           </div>
         </div>
 
-        <div className="bg-slate-950/60 border border-slate-800/80 p-3 rounded-xl flex flex-col justify-center select-all">
-          <span className="text-[10px] text-slate-500 font-mono">EXPORT PATH</span>
-          <span className="text-[10px] font-mono text-indigo-300 truncate mt-0.5" title={result.export_path}>
-            {result.export_path}
-          </span>
+        <div className="bg-slate-950/60 border border-slate-800/80 p-3 rounded-xl flex flex-col justify-center">
+          <span className="text-[10px] text-slate-500 font-mono">EXPORT FILE</span>
+          {result.export_path ? (
+            <a
+              href={`/api/download?path=${encodeURIComponent(result.export_path)}`}
+              download="Clarify_Session.docx"
+              className="text-[10px] font-mono text-indigo-300 hover:text-indigo-200 underline underline-offset-2 truncate mt-0.5 transition"
+              title={result.export_path}
+            >
+              Download DOCX ↓
+            </a>
+          ) : (
+            <span className="text-[10px] font-mono text-slate-500 mt-0.5">Not available</span>
+          )}
         </div>
 
         <div className="bg-slate-950/60 border border-slate-800/80 p-3 rounded-xl flex flex-col justify-center select-all">

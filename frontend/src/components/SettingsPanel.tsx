@@ -1,17 +1,15 @@
 import { useState } from "react";
 import { X, Folder, FileText, Key, Cpu, Save, CheckCircle, AlertCircle, Loader2, Database, Wifi } from "lucide-react";
-import { EngineSettings, ExportFormat, AudioDevice } from "../types";
+import { EngineSettings, ExportFormat } from "../types";
 
 interface SettingsPanelProps {
   settings: EngineSettings;
-  devices: AudioDevice[];
   onSave: (newSettings: EngineSettings) => void;
   onClose: () => void;
 }
 
 export function SettingsPanel({
   settings,
-  devices,
   onSave,
   onClose,
 }: SettingsPanelProps) {

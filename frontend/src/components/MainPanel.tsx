@@ -1,30 +1,24 @@
 import { useState } from "react";
 import { Disc, Square, Settings, Volume2, Sparkles } from "lucide-react";
-import { AppState, AudioDevice, EngineSettings, ProgressPayload } from "../types";
+import { AppState, EngineSettings, ProgressPayload } from "../types";
 import { motion, AnimatePresence } from "motion/react";
 
 interface MainPanelProps {
   appState: AppState;
-  devices: AudioDevice[];
   settings: EngineSettings;
   progress: ProgressPayload;
   recordingDuration: number;
-  selectedDeviceId: string;
-  setSelectedDeviceId: (id: string) => void;
   onOpenSettings: () => void;
-  onStartRecording: (useRealMic: boolean) => void;
+  onStartRecording: () => void;
   onStopRecording: () => void;
   onRunSimulation: (sampleIndex: number) => void;
 }
 
 export function MainPanel({
   appState,
-  devices,
   settings,
   progress,
   recordingDuration,
-  selectedDeviceId,
-  setSelectedDeviceId,
   onOpenSettings,
   onStartRecording,
   onStopRecording,
@@ -40,8 +34,7 @@ export function MainPanel({
     return `${mm}:${ss}`;
   };
 
-  // Compute selected device name text
-  const currentDevice = devices.find((d) => d.id === selectedDeviceId);
+
 
   return (
     <div className="bg-slate-900/40 border border-slate-800/80 rounded-2xl p-6 relative overflow-hidden backdrop-blur-md shadow-2xl flex flex-col gap-6">
@@ -102,7 +95,7 @@ export function MainPanel({
                   {/* Real Recording Frame */}
                   <div className="flex flex-col gap-2 items-center">
                     <button
-                      onClick={() => onStartRecording(true)}
+                      onClick={onStartRecording}
                       className="group relative flex items-center justify-center w-28 h-28 rounded-full bg-slate-950/30 border border-slate-800 shadow-inner group hover:border-slate-700 focus:outline-none"
                       id="btn_recording_trigger"
                     >
@@ -202,7 +195,7 @@ export function MainPanel({
                   {formatDuration(recordingDuration)}
                 </span>
                 <span className="text-xs font-mono text-emerald-400 flex items-center gap-1.5 uppercase tracking-wider animate-pulse font-semibold">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500" /> CAPTURING SYSTEM LOOPBACK AUDIO
+                  <span className="w-2 h-2 rounded-full bg-emerald-500" /> CAPTURING TAB AUDIO
                 </span>
               </div>
 
@@ -220,9 +213,6 @@ export function MainPanel({
                 ))}
               </div>
 
-              <div className="text-center">
-                <p className="text-xs text-slate-400">Captured through interface: <span className="font-mono text-white text-[11px]">{currentDevice?.name}</span></p>
-              </div>
             </motion.div>
           ) : (
             <motion.div

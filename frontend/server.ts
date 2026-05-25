@@ -1,19 +1,3 @@
-/**
- * server.ts — Clarify Frontend Bridge Server
- * -------------------------------------------
- * This Express server is the ONLY file that talks to the Python backend.
- * It proxies requests from the React frontend to either:
- *   - Local mode:  Python MeetScribeEngine via server_api.py (http://localhost:8000)
- *   - Remote mode: Same server_api.py running on the RTX 5060 PC
- *
- * The frontend sends audio as base64 WebM. This server converts it to WAV
- * via ffmpeg and forwards it to the Python FastAPI backend for AI processing.
- *
- * IMPORTANT: Do NOT replace the Python backend stack. Do NOT use Gemini,
- * OpenAI, or any other cloud API for transcription or summarization.
- * All AI runs locally via Parakeet (NeMo) + Ollama on the Python side.
- */
-
 import express from "express";
 import path from "path";
 import dotenv from "dotenv";
@@ -22,6 +6,8 @@ import { execFile, spawn } from "child_process";
 import { promisify } from "util";
 import fs from "fs";
 import os from "os";
+import https from "https";
+import http from "http";
 
 dotenv.config();
 
@@ -31,6 +17,11 @@ const PORT = 3000;
 // Increase JSON limit — audio payloads can be large
 app.use(express.json({ limit: "200mb" }));
 app.use(express.urlencoded({ limit: "200mb", extended: true }));
+
+app.use((req, res, next) => {
+  res.setHeader("Permissions-Policy", "display-capture=*");
+  next();
+});
 
 // ── Python backend base URL ───────────────────────────────────────────
 // Defaults to localhost (local mode). Frontend passes server_url for remote mode.
@@ -201,29 +192,6 @@ app.get("/api/startup-check", async (req, res) => {
   }
 });
 
-/**
- * GET /api/devices
- * Fetches real WASAPI loopback devices from the Python backend.
- */
-app.get("/api/devices", async (req, res) => {
-  try {
-    const data = await backendGet("/devices");
-    // Python returns: { devices: string[] }
-    // Frontend expects: AudioDevice[]
-    const devices = (data.devices as string[]).map((name: string, i: number) => ({
-      name,
-      id: `device_${i}`,
-      is_default: i === 0,
-    }));
-    res.json(devices);
-  } catch (err: any) {
-    console.warn("Could not fetch devices from backend:", err.message);
-    // Return a sensible fallback so the UI doesn't break if backend is warming up
-    res.json([
-      { name: "Default WASAPI Loopback (Auto-detected)", id: "wasapi_default", is_default: true },
-    ]);
-  }
-});
 
 /**
  * POST /api/check-ollama
@@ -343,12 +311,44 @@ app.post("/api/process", async (req, res) => {
 });
 
 /**
- * GET /api/status/:id
- * Polls job status from the Python backend and translates it for the frontend.
- *
- * Python returns: { job_id, status, progress_pct, progress_msg, transcript, summary, speakers, duration_seconds, error }
- * Frontend expects: { id, stage, pct, msg, result, error }
+ * GET /api/download?path=<server-side-path>
+ * Streams a backend-generated file (DOCX, PDF, TXT) to the browser.
+ * Only serves files inside the configured output directory to prevent
+ * path traversal attacks.
  */
+app.get("/api/download", (req, res) => {
+  const requestedPath = req.query.path as string;
+
+  if (!requestedPath) {
+    return res.status(400).json({ error: "Missing 'path' query parameter." });
+  }
+
+  const outputRoot = path.resolve(process.env.OUTPUT_DIR || "./output");
+  const resolvedPath = path.resolve(requestedPath);
+
+  // Reject any path that escapes the output directory
+  if (!resolvedPath.startsWith(outputRoot)) {
+    return res.status(403).json({ error: "Access denied: path is outside output directory." });
+  }
+
+  if (!fs.existsSync(resolvedPath)) {
+    return res.status(404).json({ error: "File not found." });
+  }
+
+  const ext = path.extname(resolvedPath).toLowerCase();
+  const mimeTypes: Record<string, string> = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pdf":  "application/pdf",
+    ".txt":  "text/plain",
+    ".wav":  "audio/wav",
+  };
+  const mimeType = mimeTypes[ext] || "application/octet-stream";
+
+  res.setHeader("Content-Type", mimeType);
+  res.setHeader("Content-Disposition", `attachment; filename="${path.basename(resolvedPath)}"`);
+  fs.createReadStream(resolvedPath).pipe(res);
+});
+
 app.get("/api/status/:id", async (req, res) => {
   const jobId = req.params.id;
 
@@ -407,30 +407,61 @@ app.get("/api/status/:id", async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════
 
 async function startServer() {
-  // Check ffmpeg availability before accepting any requests
   await checkFfmpeg();
+
+  const certPath = path.join(process.cwd(), "cert.pem");
+  const keyPath  = path.join(process.cwd(), "key.pem");
+  const hasCerts = fs.existsSync(certPath) && fs.existsSync(keyPath);
+
+  const httpsOptions = hasCerts ? {
+    cert: fs.readFileSync(certPath),
+    key:  fs.readFileSync(keyPath),
+  } : null;
+
+  // Create the HTTP(S) server first so we can pass it to Vite middleware.
+  // Vite needs a reference to the actual server to configure HMR (ws vs wss)
+  // correctly — without this, HMR tries ws:// on an HTTPS page and browsers
+  // block the mixed-content websocket, causing a blank page with no errors.
+  const server = httpsOptions
+    ? https.createServer(httpsOptions, app)
+    : http.createServer(app);
 
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        // Pass the actual server so Vite configures HMR over wss:// automatically
+        hmr: { server },
+      },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
+    console.log("Production Assets Path:", distPath);
     app.use(express.static(distPath));
-    app.get("*", (req, res) => {
+    app.get("*", (_req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  server.listen(PORT, "0.0.0.0", () => {
+    const protocol = httpsOptions ? "https" : "http";
     console.log("");
     console.log("  ╔══════════════════════════════════════╗");
-    console.log("  ║     Clarify Frontend Bridge           ║");
-    console.log(`  ║     http://localhost:${PORT}             ║`);
+    console.log(`  ║     Clarify Frontend Bridge           ║`);
+    console.log(`  ║     ${protocol}://localhost:${PORT}             ║`);
     console.log(`  ║     Python backend: ${DEFAULT_BACKEND.padEnd(17)}║`);
     console.log("  ╚══════════════════════════════════════╝");
+    console.log("");
+    if (httpsOptions) {
+      console.log("  Access from laptop: https://<tailscale-ip>:3000");
+      console.log("  NOTE: Accept the certificate warning on first visit.");
+    } else {
+      console.log("  ⚠ No certs found — running HTTP only.");
+      console.log("  Tab audio capture will NOT work from other devices.");
+      console.log("  Generate certs with mkcert or openssl to enable HTTPS.");
+    }
     console.log("");
     console.log("  Make sure the Python backend is running:");
     console.log("    cd ../backend && python server_api.py");

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { AppState, AudioDevice, EngineSettings, ProgressPayload, ProcessingResult, StartupAlerts } from "./types";
+import { AppState, EngineSettings, ProgressPayload, ProcessingResult, StartupAlerts } from "./types";
 import { Header } from "./components/Header";
 import { MainPanel } from "./components/MainPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
@@ -13,15 +13,12 @@ const DEFAULT_SETTINGS: EngineSettings = {
   hf_token: "",
   ollama_model: "gemma3:4b",
   ollama_num_ctx: 8192,
-  device_name: "Default WASAPI Loopback (Auto-detected)",
   server_url: "http://localhost:8000",
   remote_mode: false,
 };
 
 export default function App() {
   const [appState, setAppState] = useState<AppState>(AppState.IDLE);
-  const [devices, setDevices] = useState<AudioDevice[]>([]);
-  const [selectedDeviceId, setSelectedDeviceId] = useState<string>("");
   const [settings, setSettings] = useState<EngineSettings>(DEFAULT_SETTINGS);
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -44,44 +41,59 @@ export default function App() {
     checked: false,
   });
 
-  // ── 1. Startup checks & device discovery ───────────────────────────
+  // ── 1. Startup checks ──────────────────────────────────────────────
   useEffect(() => {
-    fetch("/api/startup-check")
-      .then((res) => res.json())
-      .then((data) => {
-        setStartupAlerts({
-          ollamaRunning: data.ollamaRunning,
-          cudaAvailable: data.cudaAvailable,
-          outputWritable: data.outputWritable,
-          checked: true,
-        });
-      })
-      .catch(() => setStartupAlerts((prev) => ({ ...prev, checked: true })));
-
-    fetch("/api/devices")
-      .then((res) => res.json())
-      .then((list: AudioDevice[]) => {
-        setDevices(list);
-        const def = list.find((d) => d.is_default);
-        if (def) setSelectedDeviceId(def.id);
-        else if (list.length > 0) setSelectedDeviceId(list[0].id);
-      })
-      .catch((err) => console.error("Could not load audio devices:", err));
-
+    // Load saved settings first so startup check uses correct server_url
     const saved = localStorage.getItem("clarify_settings_v1");
     if (saved) {
-      try { setSettings(JSON.parse(saved)); } catch {}
+      try {
+        const parsed = JSON.parse(saved);
+        setSettings(parsed);
+      } catch {
+        // Corrupt saved settings — wipe them so they can't cause silent failures
+        localStorage.removeItem("clarify_settings_v1");
+      }
     }
+
+    // Retry startup check up to 3 times with a 3s gap — handles the case
+    // where Tailscale is still establishing the connection when the page loads
+    let attempts = 0;
+    const MAX_ATTEMPTS = 3;
+
+    const runCheck = () => {
+      attempts++;
+      fetch("/api/startup-check", { signal: AbortSignal.timeout(8000) })
+        .then((res) => res.json())
+        .then((data) => {
+          setStartupAlerts({
+            ollamaRunning: data.ollamaRunning,
+            cudaAvailable: data.cudaAvailable,
+            outputWritable: data.outputWritable,
+            checked: true,
+          });
+        })
+        .catch(() => {
+          if (attempts < MAX_ATTEMPTS) {
+            setTimeout(runCheck, 3000);
+          } else {
+            // All retries exhausted — mark as checked so UI doesn't hang
+            setStartupAlerts((prev) => ({ ...prev, checked: true }));
+          }
+        });
+    };
+
+    runCheck();
   }, []);
 
   // ── 2. Job status polling ──────────────────────────────────────────
   useEffect(() => {
     if (!currentJobId) return;
 
-    // Pass the backend URL so the bridge server knows where to poll
-    const backendUrl = settings.remote_mode && settings.server_url
-      ? settings.server_url
-      : "http://localhost:8000";
+    // The bridge server (Node) always talks to Python on localhost:8000 —
+    // it's co-located on the same PC. remote_mode only applies when the
+    // frontend would talk directly to a backend, which it never does here.
+    // Passing anything other than localhost confuses Node's proxy logic.
+    const backendUrl = "http://localhost:8000";
 
     const pollInterval = setInterval(async () => {
       try {
@@ -200,9 +212,6 @@ export default function App() {
       };
       mediaRecorderRef.current.stop();
       try { mediaRecorderRef.current.stream.getTracks().forEach((t) => t.stop()); } catch {}
-    } else {
-      // No browser audio — Python backend's WASAPI capture was used
-      submitJob(null, duration, false, 0);
     }
   };
 
@@ -297,12 +306,9 @@ export default function App() {
         ) : (
           <MainPanel
             appState={appState}
-            devices={devices}
             settings={settings}
             progress={progress}
             recordingDuration={recordingDuration}
-            selectedDeviceId={selectedDeviceId}
-            setSelectedDeviceId={setSelectedDeviceId}
             onOpenSettings={() => setIsSettingsOpen(true)}
             onStartRecording={handleStartRecording}
             onStopRecording={handleStopRecording}
@@ -338,7 +344,6 @@ export default function App() {
       {isSettingsOpen && (
         <SettingsPanel
           settings={settings}
-          devices={devices}
           onSave={handleSaveSettings}
           onClose={() => setIsSettingsOpen(false)}
         />
