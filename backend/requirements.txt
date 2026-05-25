@@ -1,0 +1,37 @@
+# MeetScribe — Python dependencies
+# Install with: pip install -r requirements.txt
+#
+# NOTE: Some packages have additional system requirements (CUDA, etc.)
+# See SETUP.md for full installation walkthrough.
+
+# ── Audio capture (Windows WASAPI loopback) ───────────────────────────
+pyaudiowpatch>=0.2.12          # PyAudio fork with WASAPI loopback support
+
+# ── Audio processing ──────────────────────────────────────────────────
+numpy>=1.24
+scipy>=1.11                    # for high-quality resampling
+
+# ── STT: NVIDIA Parakeet via NeMo ─────────────────────────────────────
+# Full NeMo install (large, ~2GB):
+nemo_toolkit[asr]>=1.23
+#
+# OR lightweight alternative if NeMo is too heavy:
+# pip install huggingface_hub transformers accelerate
+# (requires custom transcriber adapter — see docs)
+
+# ── Speaker diarization ───────────────────────────────────────────────
+pyannote.audio>=3.1            # requires HuggingFace token + model acceptance
+# torch and torchaudio are pulled in by pyannote
+
+# ── Summarization: Llama 3.3 via Ollama ──────────────────────────────
+# Ollama itself is a separate install: https://ollama.com/download
+# No Python package needed — we call the local HTTP API directly.
+# Optional: install the official client for convenience:
+# ollama>=0.1.7
+
+# ── Export ────────────────────────────────────────────────────────────
+python-docx>=1.1               # DOCX export
+reportlab>=4.1                 # PDF export
+
+# ── Packaging as executable ───────────────────────────────────────────
+# pyinstaller>=6.5             # uncomment to include in dev env

@@ -1,0 +1,10 @@
+{
+  "name": "Clarify",
+  "description": "An elegant meeting recorder, transcription, and summarization assistant.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
