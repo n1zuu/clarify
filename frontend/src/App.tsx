@@ -93,7 +93,9 @@ export default function App() {
     // it's co-located on the same PC. remote_mode only applies when the
     // frontend would talk directly to a backend, which it never does here.
     // Passing anything other than localhost confuses Node's proxy logic.
-    const backendUrl = "http://localhost:8000";
+    const backendUrl = settings.remote_mode && settings.server_url
+      ? settings.server_url
+      : "http://localhost:8000";
 
     const pollInterval = setInterval(async () => {
       try {
