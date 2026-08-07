@@ -144,16 +144,22 @@ class Exporter:
             if not line.strip():
                 continue
             p = doc.add_paragraph()
-            # Bold speaker labels like "[00:01] Speaker 1:"
-            if ":" in line and line.startswith("["):
-                parts = line.split(":", 2)
-                if len(parts) >= 2:
-                    label = parts[0] + ":"
-                    content = parts[1] if len(parts) == 2 else ":".join(parts[1:])
+            # Lines are formatted as "[MM:SS] Speaker N: text" or "[HH:MM:SS] Speaker N: text"
+            # We must isolate the timestamp bracket first before splitting on ':'
+            # to avoid mangling the colon inside the timestamp itself.
+            if line.startswith("[") and "] " in line:
+                bracket_end = line.index("] ")
+                timestamp = line[: bracket_end + 1]        # e.g. "[00:01]"
+                remainder = line[bracket_end + 2:]         # e.g. "Speaker 1: hello"
+                if ": " in remainder:
+                    speaker, text = remainder.split(": ", 1)
+                    label = f"{timestamp} {speaker}:"
                     p.add_run(label).bold = True
-                    p.add_run(content)
+                    p.add_run(f" {text}")
                 else:
-                    p.add_run(line)
+                    # No speaker label — just timestamp + text
+                    p.add_run(f"{timestamp} ").bold = True
+                    p.add_run(remainder)
             else:
                 p.add_run(line)
             p.paragraph_format.space_after = Pt(3)
