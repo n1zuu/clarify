@@ -208,9 +208,11 @@ class MeetScribeEngine:
             logger.exception("Processing pipeline failed")
             self._emit_error(str(e))
 
-    def _process(self, audio_data, duration: float) -> ProcessingResult:
+    def _process(self, audio_data, duration: float, config: Optional[EngineConfig] = None) -> ProcessingResult:
         result = ProcessingResult(duration_seconds=duration)
-        cfg = self.config
+        # Use a per-call config snapshot if provided (thread-safe for concurrent
+        # jobs) — otherwise fall back to the engine's configured defaults.
+        cfg = config if config is not None else self.config
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         out_dir = Path(cfg.output_dir) / timestamp
         out_dir.mkdir(parents=True, exist_ok=True)

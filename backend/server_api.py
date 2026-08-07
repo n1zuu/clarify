@@ -15,23 +15,26 @@ Fixes in this version:
 from __future__ import annotations
 
 import base64
+import json
+import numpy as np
 import os
+import shutil
 import sys
-import time
 import tempfile
 import threading
-import uuid
+import time
 import urllib.request
-import json
+import uuid
+import wave
 from pathlib import Path
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from core.engine import MeetScribeEngine, ProcessingResult
+from core.engine import EngineConfig, MeetScribeEngine, ProcessingResult
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -41,10 +44,28 @@ app = FastAPI(title="MeetScribe Remote API", version="1.2")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+    ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Optional API key auth ──────────────────────────────────────────────
+# Set CLARIFY_API_KEY to require an X-API-Key header on every request.
+# Off by default so local/simulation usage keeps working unchanged.
+_API_KEY = os.environ.get("CLARIFY_API_KEY", "").strip()
+
+
+def _require_api_key(x_api_key: Optional[str] = Header(default=None)):
+    if _API_KEY and x_api_key != _API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
+    return True
+
 
 # ── Engine ─────────────────────────────────────────────────────────────
 engine = MeetScribeEngine()
@@ -60,6 +81,22 @@ engine.configure(
 # ── Job store ──────────────────────────────────────────────────────────
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
+# Jobs older than this are purged on each new submission to prevent leaks.
+_JOB_TTL_SECONDS = 60 * 60  # 1 hour
+
+
+def _purge_old_jobs():
+    """Remove completed/errored jobs older than the TTL from the store."""
+    now = time.time()
+    with _jobs_lock:
+        expired = [
+            jid for jid, job in _jobs.items()
+            if job.get("created_at", 0) < now - _JOB_TTL_SECONDS
+        ]
+        for jid in expired:
+            _jobs.pop(jid, None)
+    if expired:
+        logger.info(f"Purged {len(expired)} expired job(s) from store.")
 
 # ── Sample data for simulation mode ───────────────────────────────────
 SIMULATION_SAMPLES = [
@@ -182,7 +219,7 @@ def _check_ollama(model: str = "gemma3:4b") -> tuple[bool, str]:
 # Routes
 # ══════════════════════════════════════════════════════════════════════
 
-@app.get("/health")
+@app.get("/health", dependencies=[Depends(_require_api_key)])
 def health():
     """Connectivity + Ollama check. Safe to call before engine is configured."""
     model = engine.config.ollama_model if hasattr(engine, "config") else "gemma3:4b"
@@ -195,8 +232,10 @@ def health():
     }
 
 
-@app.post("/jobs/submit", response_model=JobStatusResponse)
+@app.post("/jobs/submit", response_model=JobStatusResponse, dependencies=[Depends(_require_api_key)])
 def submit_job(payload: AudioSubmitRequest, background_tasks: BackgroundTasks):
+    # Opportunistically GC old jobs so the store doesn't grow unbounded.
+    _purge_old_jobs()
     job_id = str(uuid.uuid4())[:8]
     with _jobs_lock:
         _jobs[job_id] = {
@@ -208,23 +247,19 @@ def submit_job(payload: AudioSubmitRequest, background_tasks: BackgroundTasks):
             "speakers": [],
             "duration_seconds": 0.0,
             "error": None,
+            "created_at": time.time(),
         }
     background_tasks.add_task(_run_job, job_id, payload)
     return JobStatusResponse(job_id=job_id, status="queued", progress_msg="Job queued…")
 
 
-@app.get("/jobs/{job_id}", response_model=JobStatusResponse)
+@app.get("/jobs/{job_id}", response_model=JobStatusResponse, dependencies=[Depends(_require_api_key)])
 def get_job(job_id: str):
     with _jobs_lock:
         job = _jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
     return JobStatusResponse(job_id=job_id, **job)
-
-
-@app.get("/devices")
-def list_devices():
-    return {"devices": engine.list_audio_devices()}
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -240,6 +275,7 @@ def _run_job(job_id: str, payload: AudioSubmitRequest):
             for k, v in kwargs.items():
                 _jobs[job_id][k] = v
 
+    tmp_dir = None  # ensure always defined so finally block never NameErrors
     try:
         # ── Simulation mode ────────────────────────────────────────────
         if payload.is_simulated or payload.audio_b64 is None:
@@ -254,21 +290,31 @@ def _run_job(job_id: str, payload: AudioSubmitRequest):
         wav_path = tmp_dir / "upload.wav"
         wav_path.write_bytes(wav_bytes)
 
-        engine.configure(
-            output_dir="./output",
-            export_format=payload.export_format,
-            diarization=payload.diarization,
-            ollama_model=payload.ollama_model,
-            hf_token=os.environ.get("HF_TOKEN"),
-        )
-        engine.on_progress = lambda stage, pct, msg: _update(pct=pct, msg=msg)
-
-        import wave, numpy as np
         with wave.open(str(wav_path), "rb") as wf:
             duration = wf.getnframes() / wf.getframerate()
 
         audio_data = _load_wav_as_float32(str(wav_path))
-        result: ProcessingResult = engine._process(audio_data, duration)
+
+        # Create a dedicated engine per job with a private config snapshot.
+        # This avoids mutating the shared module-level `engine` (which would
+        # race for concurrent jobs) and keeps each job's progress callback
+        # scoped to its own job.
+        job_engine = MeetScribeEngine()
+        job_engine.config = EngineConfig(
+            output_dir="./output",
+            export_format=payload.export_format,
+            diarization=payload.diarization,
+            ollama_model=payload.ollama_model,
+            ollama_host=engine.config.ollama_host,
+            sample_rate=engine.config.sample_rate,
+            channels=engine.config.channels,
+            parakeet_model=engine.config.parakeet_model,
+            diarization_model=engine.config.diarization_model,
+            hf_token=os.environ.get("HF_TOKEN") or engine.config.hf_token,
+        )
+        job_engine.on_progress = lambda stage, pct, msg: _update(pct=pct, msg=msg)
+
+        result: ProcessingResult = job_engine._process(audio_data, duration)
 
         _update(
             status="done", pct=1.0, msg="Processing complete.",
@@ -283,11 +329,8 @@ def _run_job(job_id: str, payload: AudioSubmitRequest):
         logger.exception(f"Job {job_id} failed: {e}")
         _update(status="error", msg=str(e), error=str(e))
     finally:
-        try:
-            import shutil
+        if tmp_dir is not None:
             shutil.rmtree(tmp_dir, ignore_errors=True)
-        except Exception:
-            pass
 
 
 def _run_simulation(job_id: str, payload: AudioSubmitRequest, _update):
@@ -323,8 +366,7 @@ def _run_simulation(job_id: str, payload: AudioSubmitRequest, _update):
 # Helpers
 # ══════════════════════════════════════════════════════════════════════
 
-def _load_wav_as_float32(path: str):
-    import wave, numpy as np
+def _load_wav_as_float32(path: str) -> np.ndarray:
     with wave.open(path, "rb") as wf:
         raw = wf.readframes(wf.getnframes())
         return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0

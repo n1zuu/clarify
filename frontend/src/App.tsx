@@ -89,10 +89,10 @@ export default function App() {
   useEffect(() => {
     if (!currentJobId) return;
 
-    // The bridge server (Node) always talks to Python on localhost:8000 —
-    // it's co-located on the same PC. remote_mode only applies when the
-    // frontend would talk directly to a backend, which it never does here.
-    // Passing anything other than localhost confuses Node's proxy logic.
+    // The Node bridge forwards status polls to the backend URL we pass here.
+    // In local mode that's the co-located Python backend on localhost:8000.
+    // In remote mode the user's server_url (e.g. http://192.168.1.X:8000)
+    // is forwarded so the bridge polls the remote PC instead.
     const backendUrl = settings.remote_mode && settings.server_url
       ? settings.server_url
       : "http://localhost:8000";

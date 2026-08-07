@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Disc, Square, Settings, Volume2, Sparkles } from "lucide-react";
 import { AppState, EngineSettings, ProgressPayload } from "../types";
 import { motion, AnimatePresence } from "motion/react";
+import { formatDuration } from "../utils";
 
 interface MainPanelProps {
   appState: AppState;
@@ -26,15 +27,6 @@ export function MainPanel({
 }: MainPanelProps) {
   const [activeTab, setActiveTab] = useState<"real" | "simulate">("real");
   const [selectedSampleIndex, setSelectedSampleIndex] = useState<number>(0);
-
-  // Format MM:SS duration
-  const formatDuration = (seconds: number) => {
-    const mm = Math.floor(seconds / 60).toString().padStart(2, "0");
-    const ss = Math.floor(seconds % 60).toString().padStart(2, "0");
-    return `${mm}:${ss}`;
-  };
-
-
 
   return (
     <div className="bg-slate-900/40 border border-slate-800/80 rounded-2xl p-6 relative overflow-hidden backdrop-blur-md shadow-2xl flex flex-col gap-6">

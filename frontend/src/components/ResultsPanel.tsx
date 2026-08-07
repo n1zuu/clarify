@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { FileText, Download, Users, Clock, Copy, Check, CheckCircle, ExternalLink, HelpCircle } from "lucide-react";
 import { ProcessingResult } from "../types";
+import { translateDurationType } from "../utils";
 
 interface ResultsPanelProps {
   result: ProcessingResult;
@@ -50,14 +51,6 @@ export function ResultsPanel({ result, onClose }: ResultsPanelProps) {
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
-  };
-
-  // Convert seconds to human format e.g. "1m 45s"
-  const translateDurationType = (seconds: number) => {
-    if (!seconds) return "0s";
-    const mm = Math.floor(seconds / 60);
-    const ss = Math.floor(seconds % 60);
-    return mm > 0 ? `${mm}m ${ss}s` : `${ss}s`;
   };
 
   return (

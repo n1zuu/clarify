@@ -20,9 +20,7 @@ Windows file-locking issues with NeMo's internal temp files.
 from __future__ import annotations
 
 import gc
-import json
 import os
-import shutil
 import tempfile
 from typing import Optional
 
@@ -36,6 +34,11 @@ logger = get_logger(__name__)
 WINDOW_SEC  = 30.0                       # seconds per chunk
 OVERLAP_SEC = 5.0                        # overlap between consecutive chunks
 STRIDE_SEC  = WINDOW_SEC - OVERLAP_SEC   # how far we advance each step (25s)
+
+
+# Module-level model cache so concurrent jobs reuse the same loaded model
+# instead of re-downloading/re-loading it (saves VRAM and startup time).
+_MODEL_CACHE: dict[str, object] = {}
 
 
 class Transcriber:
@@ -67,6 +70,12 @@ class Transcriber:
     def _load_model(self):
         if self._model is not None:
             return
+        # Reuse a cached model instance if one was already loaded for this name.
+        cached = _MODEL_CACHE.get(self.model_name)
+        if cached is not None:
+            self._model = cached
+            logger.info(f"Using cached Parakeet model: {self.model_name}")
+            return
         logger.info(f"Loading Parakeet model: {self.model_name}")
         try:
             import nemo.collections.asr as nemo_asr  # type: ignore
@@ -74,7 +83,19 @@ class Transcriber:
                 model_name=self.model_name
             )
             self._model.eval()
+            _MODEL_CACHE[self.model_name] = self._model
             logger.info("Parakeet model loaded.")
+
+            # Warn if a CTC model is used — FRAME_DURATION in _extract_word_timestamps
+            # is tuned for TDT variants; CTC may use a different frame stride,
+            # causing systematic timestamp errors.
+            if "ctc" in self.model_name.lower():
+                logger.warning(
+                    f"Model '{self.model_name}' appears to be a CTC variant. "
+                    "FRAME_DURATION=0.04s is calibrated for TDT models. "
+                    "Word-level timestamps may be inaccurate. "
+                    "Verify frame stride for your specific CTC checkpoint."
+                )
         except ImportError:
             raise RuntimeError(
                 "NeMo ASR is not installed. Install it with:\n"
@@ -151,39 +172,20 @@ class Transcriber:
     def _transcribe_chunk(self, audio_path: str) -> list[dict]:
         """
         Transcribe a single chunk WAV file.
-        Manages its own temp dir so NeMo never races on manifest.json
-        (avoids WinError 32 on Windows).
         Returns a list of word dicts with LOCAL timestamps (0-based).
         """
-        tmp_dir = tempfile.mkdtemp()
-        manifest_path = os.path.join(tmp_dir, "manifest.json")
-
         try:
-            # Write manifest and fully flush/close before NeMo touches it
-            with open(manifest_path, "w") as f:
-                json.dump(
-                    {"audio_filepath": audio_path, "duration": None, "text": ""},
-                    f,
-                )
-                f.flush()
-                os.fsync(f.fileno())
-
-            try:
-                output = self._model.transcribe(
-                    audio=[audio_path],
-                    return_hypotheses=True,
-                    num_workers=0,
-                )
-            except TypeError:
-                output = self._model.transcribe(
-                    paths2audio_files=[audio_path],
-                    return_hypotheses=True,
-                    num_workers=0,
-                )
-
-        finally:
-            # Always remove temp dir ourselves — never leave it to NeMo
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+            output = self._model.transcribe(
+                audio=[audio_path],
+                return_hypotheses=True,
+                num_workers=0,
+            )
+        except TypeError:
+            output = self._model.transcribe(
+                paths2audio_files=[audio_path],
+                return_hypotheses=True,
+                num_workers=0,
+            )
 
         # Unwrap NeMo's various output shapes
         result = output
@@ -353,13 +355,17 @@ def _extract_word_timestamps(hypothesis) -> list[dict]:
                         "end":   float(e) * FRAME_DURATION,
                     })
                 if words:
-                    # Sanity-check: first timestamp should be < 120s for a 30s chunk
-                    if words[0]["start"] < 120.0:
+                    # Sanity-check: first timestamp should be well within the
+                    # chunk window. Use WINDOW_SEC * 2 as a generous upper bound
+                    # so this scales correctly if WINDOW_SEC is ever changed.
+                    _ts_sanity_limit = WINDOW_SEC * 2
+                    if words[0]["start"] < _ts_sanity_limit:
                         return words
                     else:
                         logger.warning(
                             "timestep offsets look wrong "
-                            f"(first start={words[0]['start']:.1f}s) — trying next strategy."
+                            f"(first start={words[0]['start']:.1f}s, "
+                            f"limit={_ts_sanity_limit:.1f}s) — trying next strategy."
                         )
                         words = []
     except Exception as e:
@@ -412,21 +418,13 @@ def _extract_word_timestamps(hypothesis) -> list[dict]:
 
 def _words_to_segments(
     words: list[dict],
-    max_words_per_segment: int = 8,
-    silence_threshold: float = 0.4,
-    max_duration_seconds: float = 4.0,
+    max_words_per_segment: int = 30,
+    silence_threshold: float = 1.5,
 ) -> list[dict]:
     """
-    Group a flat word list into short segments suitable for speaker assignment.
-
-    Splits on whichever condition fires first:
-      1. Silence gap >= silence_threshold (default 0.4s) — likely a speaker turn
-      2. Segment duration >= max_duration_seconds (default 4s) — hard cap
-      3. Word count >= max_words_per_segment (default 8 words) — safety cap
-
-    Keeping segments short is critical for accurate diarization — if a segment
-    spans 25 seconds it will be assigned to whichever speaker talked most in
-    that window, losing all the other speakers' turns entirely.
+    Group a flat word list into segments, splitting on:
+      1. Silences longer than silence_threshold seconds
+      2. Segments exceeding max_words_per_segment words
     """
     if not words:
         return []
@@ -435,15 +433,11 @@ def _words_to_segments(
     current_words = [words[0]]
 
     for word in words[1:]:
-        prev_end      = current_words[-1]["end"]
-        seg_start     = current_words[0]["start"]
-        gap           = word["start"] - prev_end
-        duration      = prev_end - seg_start
-        too_many_words = len(current_words) >= max_words_per_segment
-        too_long       = duration >= max_duration_seconds
-        natural_break  = gap >= silence_threshold
+        prev_end = current_words[-1]["end"]
+        gap      = word["start"] - prev_end
+        too_long = len(current_words) >= max_words_per_segment
 
-        if natural_break or too_long or too_many_words:
+        if gap > silence_threshold or too_long:
             segments.append(_make_segment(current_words))
             current_words = [word]
         else:

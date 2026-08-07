@@ -243,6 +243,8 @@ def _split_into_chunks(text: str, chunk_size: int) -> list[str]:
     Split transcript into chunks at sentence/line boundaries,
     trying to keep each chunk under chunk_size characters.
     """
+    if not text.strip():
+        return []
     lines = text.split("\n")
     chunks = []
     current = []

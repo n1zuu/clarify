@@ -16,6 +16,11 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+# Module-level pipeline cache so concurrent jobs reuse the same loaded
+# pipeline instead of re-downloading/re-loading it (saves VRAM + startup time).
+_PIPELINE_CACHE: dict[str, object] = {}
+
+
 class Diarizer:
 
     def __init__(
@@ -38,6 +43,13 @@ class Diarizer:
                 "2. Accept terms at https://huggingface.co/pyannote/speaker-diarization-3.1\n"
                 "3. Pass it as hf_token= or set HF_TOKEN environment variable."
             )
+
+        # Reuse a cached pipeline if one was already loaded for this model name.
+        cached = _PIPELINE_CACHE.get(self.model_name)
+        if cached is not None:
+            self._pipeline = cached
+            logger.info(f"Using cached diarization pipeline: {self.model_name}")
+            return
 
         try:
             from pyannote.audio import Pipeline  # type: ignore
@@ -68,6 +80,7 @@ class Diarizer:
         except Exception as e:
             logger.warning(f"Could not move diarization to GPU: {e}")
 
+        _PIPELINE_CACHE[self.model_name] = self._pipeline
         logger.info("Diarization pipeline loaded.")
 
     def assign_speakers(self, audio_path: str, segments: list[dict]) -> list[dict]:
